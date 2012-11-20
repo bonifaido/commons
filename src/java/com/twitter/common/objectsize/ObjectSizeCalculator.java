@@ -23,22 +23,18 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.collect.Sets;
-
 /**
  * Contains utility methods for calculating the memory usage of objects. It
- * only works on the HotSpot JVM, and infers the actual memory layout (32 bit
- * vs. 64 bit word size, compressed object pointers vs. uncompressed) from
+ * only works on the HotSpot JVM (1.6 and above), and infers the actual memory
+ * layout (32 bit vs. 64 bit word size, compressed object pointers vs. uncompressed) from
  * best available indicators. It can reliably detect a 32 bit vs. 64 bit JVM.
  * It can only make an educated guess at whether compressed OOPs are used,
  * though; specifically, it knows what the JVM's default choice of OOP
@@ -51,6 +47,21 @@ import com.google.common.collect.Sets;
  * @author Attila Szegedi
  */
 public class ObjectSizeCalculator {
+
+  // A drop-in replacement for the Guava LoadingCache.
+  private abstract class LoadingCache<K, V> extends HashMap<K, V> {
+
+    abstract public V load(K k);
+
+    public V getUnchecked(K k) {
+      V v = get(k);
+      if (v == null) {
+        v = load(k);
+        put(k, v);
+      }
+      return v;
+    }
+  }
 
   /**
    * Describes constant memory overheads for various constructs in a JVM implementation.
@@ -133,14 +144,15 @@ public class ObjectSizeCalculator {
   private final int superclassFieldPadding;
 
   private final LoadingCache<Class<?>, ClassSizeInfo> classSizeInfos =
-      CacheBuilder.newBuilder().build(new CacheLoader<Class<?>, ClassSizeInfo>() {
+      new LoadingCache<Class<?>, ClassSizeInfo>() {
+        @Override
         public ClassSizeInfo load(Class<?> clazz) {
           return new ClassSizeInfo(clazz);
         }
-      });
+      };
 
 
-  private final Set<Object> alreadyVisited = Sets.newIdentityHashSet();
+  private final Set<Object> alreadyVisited = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
   private final Deque<Object> pending = new ArrayDeque<Object>(16 * 1024);
   private long size;
 
@@ -151,7 +163,7 @@ public class ObjectSizeCalculator {
    * @param memoryLayoutSpecification a description of the JVM memory layout.
    */
   public ObjectSizeCalculator(MemoryLayoutSpecification memoryLayoutSpecification) {
-    Preconditions.checkNotNull(memoryLayoutSpecification);
+    if (memoryLayoutSpecification == null) throw new NullPointerException();
     arrayHeaderSize = memoryLayoutSpecification.getArrayHeaderSize();
     objectHeaderSize = memoryLayoutSpecification.getObjectHeaderSize();
     objectPadding = memoryLayoutSpecification.getObjectPadding();
@@ -266,7 +278,6 @@ public class ObjectSizeCalculator {
     size += objectSize;
   }
 
-  @VisibleForTesting
   static long roundTo(long x, int multiple) {
     return ((x + multiple - 1) / multiple) * multiple;
   }
@@ -343,7 +354,6 @@ public class ObjectSizeCalculator {
         type.getName());
   }
 
-  @VisibleForTesting
   static MemoryLayoutSpecification getEffectiveMemoryLayoutSpecification() {
     final String vmName = System.getProperty("java.vm.name");
     if (vmName == null || !vmName.startsWith("Java HotSpot(TM) ")) {
